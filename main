@@ -1,0 +1,308 @@
+import pandas as pd
+import re
+from datetime import datetime
+from unidecode import unidecode
+from difflib import SequenceMatcher
+
+def clean_phone(phone):
+    if pd.isna(phone):
+        return None
+    # Преобразуем в строку и удаляем все нецифровые символы
+    phone = str(phone)
+    digits = re.sub(r'\D', '', phone)
+    
+    # Проверяем длину номера
+    if len(digits) == 11:
+        return f"+7{digits[1:]}"
+    elif len(digits) == 10:
+        return f"+7{digits}"
+    return None
+
+def clean_date(date):
+    """Стандартизирует формат даты"""
+    if pd.isna(date):
+        return None
+    
+    # Если дата уже в формате datetime, преобразуем в строку
+    if isinstance(date, datetime):
+        return date.strftime('%d.%m.%Y')
+    
+    # Преобразуем в строку
+    date = str(date).strip()
+    
+    # Пробуем разные форматы даты
+    formats = [
+        '%d.%m.%Y', '%d/%m/%Y', '%d-%m-%Y',  # DD.MM.YYYY
+        '%Y.%m.%d', '%Y/%m/%d', '%Y-%m-%d',  # YYYY.MM.DD
+        '%d.%m.%y', '%d/%m/%y', '%d-%m-%y',  # DD.MM.YY
+        '%y.%m.%d', '%y/%m/%y', '%y-%m-%d',  # YY.MM.DD
+    ]
+    
+    # Пробуем распарсить дату в разных форматах
+    for fmt in formats:
+        try:
+            parsed_date = datetime.strptime(date, fmt)
+            return parsed_date.strftime('%d.%m.%Y')
+        except ValueError:
+            continue
+    
+    return None
+
+def split_fio(fio):
+    """Разбивает ФИО на компоненты и возвращает словарь с фамилией, именем и отчеством"""
+    parts = fio.split()
+    result = {'фамилия': None, 'имя': None, 'отчество': None}
+    
+    if len(parts) >= 1:
+        result['фамилия'] = parts[0]
+    if len(parts) >= 2:
+        result['имя'] = parts[1]
+    if len(parts) >= 3:
+        result['отчество'] = parts[2]
+    
+    return result
+
+def compare_fio_parts(fio1, fio2):
+    """Сравнивает части ФИО с учетом возможных пропусков"""
+    parts1 = split_fio(fio1)
+    parts2 = split_fio(fio2)
+    
+    # Если одна из частей пустая, а другая нет, и они достаточно похожи
+    for part in ['фамилия', 'имя', 'отчество']:
+        if (parts1[part] and not parts2[part]) or (not parts1[part] and parts2[part]):
+            continue
+        if parts1[part] and parts2[part]:
+            similarity = SequenceMatcher(None, parts1[part], parts2[part]).ratio()
+            if similarity < 0.8:  # Порог схожести
+                return False
+    
+    return True
+
+def clean_fio(fio):
+    if pd.isna(fio):
+        return None
+    
+    # Преобразуем в строку
+    fio = str(fio).strip()
+    
+    # Удаляем точки в конце
+    fio = fio.rstrip('.')
+    
+    # Удаляем скобки и их содержимое
+    fio = re.sub(r'\([^)]*\)', '', fio)
+    
+    # Удаляем лишние пробелы
+    fio = ' '.join(fio.split())
+    
+    return fio
+
+def clean_city(city):
+    if pd.isna(city):
+        return None
+    
+    city = str(city).strip()
+    
+    # Словарь замен для стандартизации названий городов
+    city_replacements = {
+        'спб': 'Санкт-Петербург',
+        'спб.': 'Санкт-Петербург',
+        'питер': 'Санкт-Петербург',
+        'мск': 'Москва',
+        'мск.': 'Москва',
+        'нск': 'Новосибирск',
+        'нск.': 'Новосибирск',
+        'екат': 'Екатеринбург',
+        'екат.': 'Екатеринбург',
+    }
+    
+    # Удаляем сокращения типа "г.", "п.", "пос.", "с.", "д."
+    city = re.sub(r'^(г\.|п\.|пос\.|с\.|д\.|город|поселок|село|деревня)\s*', '', city, flags=re.IGNORECASE)
+    
+    # Удаляем лишние пробелы
+    city = ' '.join(city.split())
+    
+    # Приводим к нижнему регистру для сравнения
+    city_lower = city.lower()
+    
+    # Проверяем наличие в словаре замен
+    for key, value in city_replacements.items():
+        if city_lower == key:
+            return value
+    
+    # Если город не найден в словаре замен, приводим к формату "Первая буква заглавная"
+    return city.title()
+
+def clean_region(region):
+    if pd.isna(region):
+        return None
+    
+    region = str(region).strip()
+    
+    # Удаляем сокращения
+    region = re.sub(r'(обл\.|респ\.|АО|край)\s*', '', region, flags=re.IGNORECASE)
+    
+    # Удаляем лишние пробелы
+    region = ' '.join(region.split())
+    
+    # Приводим к нижнему регистру для сравнения
+    region_lower = region.lower()
+    
+    # Если регион не найден в словаре замен, приводим к формату "Первая буква заглавная"
+    return region.title()
+
+def find_duplicates(df):
+    # Создаем копию DataFrame для работы
+    df_clean = df.copy()
+    
+    # Очищаем все поля
+    df_clean['ФИО'] = df_clean['ФИО'].apply(clean_fio)
+    df_clean['ТЕЛЕФОН'] = df_clean['ТЕЛЕФОН'].apply(clean_phone)
+    df_clean['ДАТА РОЖДЕНИЯ'] = df_clean['ДАТА РОЖДЕНИЯ'].apply(clean_date)
+    
+    # Создаем список для хранения групп дубликатов
+    duplicate_groups = []
+    processed_indices = set()
+    
+    # Проходим по всем строкам
+    for idx, row in df_clean.iterrows():
+        if idx in processed_indices:
+            continue
+        
+        # Находим потенциальные дубликаты по ФИО
+        potential_duplicates = []
+        for other_idx, other_row in df_clean.iterrows():
+            if other_idx != idx and other_idx not in processed_indices:
+                # Проверяем схожесть ФИО
+                if compare_fio_parts(row['ФИО'], other_row['ФИО']):
+                    # Проверяем совпадение хотя бы одного из полей
+                    if ((row['ТЕЛЕФОН'] == other_row['ТЕЛЕФОН'] and row['ТЕЛЕФОН'] is not None) or
+                        (row['ДАТА РОЖДЕНИЯ'] == other_row['ДАТА РОЖДЕНИЯ'] and row['ДАТА РОЖДЕНИЯ'] is not None) or
+                        (row['ЭЛ.ПОЧТА'] == other_row['ЭЛ.ПОЧТА'] and row['ЭЛ.ПОЧТА'] is not None) or
+                        (row['ТЕЛЕГРАМ'] == other_row['ТЕЛЕГРАМ'] and row['ТЕЛЕГРАМ'] is not None)):
+                        potential_duplicates.append(other_idx)
+        
+        if potential_duplicates:
+            duplicate_groups.append([idx] + potential_duplicates)
+            processed_indices.update([idx] + potential_duplicates)
+    
+    return duplicate_groups
+
+def find_duplicates_by_fields(df):
+    """Находит дубликаты по совпадению минимум двух полей из: телефон, дата рождения, почта, телеграм"""
+    # Создаем копию DataFrame для работы
+    df_clean = df.copy()
+    
+    # Очищаем поля
+    df_clean['ТЕЛЕФОН'] = df_clean['ТЕЛЕФОН'].apply(clean_phone)
+    df_clean['ДАТА РОЖДЕНИЯ'] = df_clean['ДАТА РОЖДЕНИЯ'].apply(clean_date)
+    
+    # Создаем список для хранения групп дубликатов
+    duplicate_groups = []
+    processed_indices = set()
+    
+    # Проходим по всем строкам
+    for idx, row in df_clean.iterrows():
+        if idx in processed_indices:
+            continue
+        
+        # Находим потенциальные дубликаты по полям
+        potential_duplicates = []
+        for other_idx, other_row in df_clean.iterrows():
+            if other_idx != idx and other_idx not in processed_indices:
+                # Считаем количество совпадающих полей
+                matching_fields = 0
+                if row['ТЕЛЕФОН'] == other_row['ТЕЛЕФОН'] and row['ТЕЛЕФОН'] is not None:
+                    matching_fields += 1
+                if row['ДАТА РОЖДЕНИЯ'] == other_row['ДАТА РОЖДЕНИЯ'] and row['ДАТА РОЖДЕНИЯ'] is not None:
+                    matching_fields += 1
+                if row['ЭЛ.ПОЧТА'] == other_row['ЭЛ.ПОЧТА'] and row['ЭЛ.ПОЧТА'] is not None:
+                    matching_fields += 1
+                if row['ТЕЛЕГРАМ'] == other_row['ТЕЛЕГРАМ'] and row['ТЕЛЕГРАМ'] is not None:
+                    matching_fields += 1
+                
+                # Если совпадает минимум 2 поля, считаем записи дубликатами
+                if matching_fields >= 2:
+                    potential_duplicates.append(other_idx)
+        
+        if potential_duplicates:
+            duplicate_groups.append([idx] + potential_duplicates)
+            processed_indices.update([idx] + potential_duplicates)
+    
+    return duplicate_groups
+
+def merge_duplicate_rows(group):
+    # Сортируем по году в обратном порядке (новые записи первыми)
+    group = group.sort_values('Год', ascending=False)
+    
+    # Берем первую строку как основу
+    result = group.iloc[0].copy()
+    
+    # Проходим по остальным строкам и заполняем пустые значения
+    for _, row in group.iloc[1:].iterrows():
+        for column in group.columns:
+            if pd.isna(result[column]) and not pd.isna(row[column]):
+                result[column] = row[column]
+    
+    return result
+
+def process_students():
+    # Читаем исходный файл
+    df = pd.read_excel('База.xlsx')
+    
+    # Создаем новый DataFrame с нужными полями
+    students_df = pd.DataFrame(columns=[
+        'id', 'ФИО', 'ТЕЛЕФОН', 'РЕГИОН', 'ГОРОД', 
+        'ШКОЛА', 'ДАТА РОЖДЕНИЯ', 'ЭЛ.ПОЧТА', 'ТЕЛЕГРАМ'
+    ])
+    
+    # Очищаем и стандартизируем данные
+    df['ТЕЛЕФОН'] = df['ТЕЛЕФОН'].apply(clean_phone)
+    df['ФИО'] = df['ФИО'].apply(clean_fio)
+    df['ГОРОД'] = df['ГОРОД'].apply(clean_city)
+    df['РЕГИОН'] = df['РЕГИОН'].apply(clean_region)
+    df['ДАТА РОЖДЕНИЯ'] = df['ДАТА РОЖДЕНИЯ'].apply(clean_date)
+    
+    # Удаляем строки, где нет ни телефона, ни ФИО
+    df = df.dropna(subset=['ТЕЛЕФОН', 'ФИО'], how='all')
+    
+    # Первый проход: находим дубликаты по ФИО
+    duplicate_groups = find_duplicates(df)
+    
+    # Объединяем дубликаты по ФИО
+    for group_indices in duplicate_groups:
+        group = df.loc[group_indices]
+        merged_row = merge_duplicate_rows(group)
+        df.loc[group_indices[0]] = merged_row
+        df = df.drop(group_indices[1:])
+    
+    # Второй проход: находим дубликаты по полям
+    duplicate_groups = find_duplicates_by_fields(df)
+    
+    # Объединяем дубликаты по полям
+    for group_indices in duplicate_groups:
+        group = df.loc[group_indices]
+        merged_row = merge_duplicate_rows(group)
+        df.loc[group_indices[0]] = merged_row
+        df = df.drop(group_indices[1:])
+    
+    # Копируем данные в новый DataFrame
+    students_df['ФИО'] = df['ФИО']
+    students_df['ТЕЛЕФОН'] = df['ТЕЛЕФОН']
+    students_df['РЕГИОН'] = df['РЕГИОН']
+    students_df['ГОРОД'] = df['ГОРОД']
+    students_df['ШКОЛА'] = df['ШКОЛА']
+    students_df['ДАТА РОЖДЕНИЯ'] = df['ДАТА РОЖДЕНИЯ']
+    students_df['ЭЛ.ПОЧТА'] = df['ЭЛ.ПОЧТА']
+    students_df['ТЕЛЕГРАМ'] = df['ТЕЛЕГРАМ']
+    
+    # Добавляем id
+    students_df['id'] = range(1, len(students_df) + 1)
+    
+    # Сохраняем результат
+    output_filename = f'students_clean_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+    students_df.to_excel(output_filename, index=False)
+    print(f'Обработка завершена. Результат сохранен в файл: {output_filename}')
+    print(f'Всего уникальных студентов: {len(students_df)}')
+
+if __name__ == '__main__':
+    process_students()
